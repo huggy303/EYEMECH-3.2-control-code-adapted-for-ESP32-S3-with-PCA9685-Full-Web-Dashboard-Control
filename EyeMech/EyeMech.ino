@@ -1,18 +1,21 @@
 /*
- * EYEMECH ε3.2 — Arduino / ESP32-S3 port
+ * EYEMECH ε3.2 — Arduino / ESP32-C3 port (direct drive, no PCA9685)
  * Converted from MicroPython original by Will Cogley
+ * Ported from the classic-ESP32 direct-drive build: same dashboard, same
+ * behaviour, servos driven straight from LEDC hardware PWM (50 Hz, 12-bit).
+ * The C3 has exactly 6 LEDC channels — all six are used here, none spare.
  *
  * Hardware:
- *   ESP32-S3 + PCA9685 PWM board via I2C (SDA=4, SCL=5)
- *   6 servos: LR, UD, TL, BL, TR, BR
+ *   ESP32-C3 dev board (e.g. ESP32-C3-DevKitM-1) + 6 servos, direct drive
+ *   6 servos: LR, UD, TL, BL, TR, BR (signal pins in SERVO_PIN[] below)
+ *   Servos need their own 5-6 V supply with a common ground to the ESP32.
  *   All control (mode selection + movement) is via the web dashboard.
  */
 
 #include <Arduino.h>
-#include <Wire.h>
 #include <WiFi.h>
 #include <WebServer.h>
-#include "PCA9685.h"
+#include "LedcServo.h"
 #include "InputProvider.h"
 #include "WebInterface.h"
 #include "EyeMath.h"   // pure, host-testable motion math: EaseType, clamp(), applyEase()
@@ -21,16 +24,21 @@
 #include <Preferences.h>   // Phase C: NVS persistence for servo calibration (built-in)
 
 // ── Bench-test flag ─────────────────────────────────────────────────────────
-//   DEBUG_PWM : log every servo command (channel, angle, pulse, I2C ACK)
+//   DEBUG_PWM : log every servo command (channel, angle, pulse)
 //               to the Serial Monitor at 115200 baud.
 #define DEBUG_PWM      0
 
-// ── Pin definitions ────────────────────────────────────────────────────────
-//   Only the I2C bus to the PCA9685 remains — there is no physical input.
-#define PIN_I2C_SDA     4   // PCA9685 SDA
-#define PIN_I2C_SCL     5   // PCA9685 SCL
+// ── Servo signal pins (direct drive, ESP32-C3) ─────────────────────────────
+//   One GPIO per servo, LEDC hardware PWM. ESP32-C3 has only GPIO 0-21 and
+//   exactly 6 LEDC channels — all six are used here, none spare. Pins avoid
+//   strapping pins (2/8/9 — 8 is also the onboard RGB LED), SPI flash pins
+//   (12-17), USB D-/D+ (18/19) and UART0 (20/21, serial console). Spares
+//   if you need to move one: 0, 1, 11. Change the numbers here only —
+//   everything else follows the CH_* channel numbers below.
+//   Order: LR, UD, TL, BL, TR, BR.
+const uint8_t SERVO_PIN[6] = { 3, 4, 5, 6, 7, 10 };
 
-// ── Servo channel mapping on PCA9685 ───────────────────────────────────────
+// ── Servo channel mapping (LEDC channel = index into SERVO_PIN[]) ──────────
 #define CH_LR   0   // Left / Right eye pan
 #define CH_UD   1   // Up / Down eye tilt
 #define CH_TL   2   // Top-Left  eyelid
@@ -83,7 +91,7 @@ int  calSel  = 0;         // selected channel for jog/capture (CH_LR)
 // insertion point stays below the type declarations enterMode() depends on.
 
 // ── Runtime state ──────────────────────────────────────────────────────────
-PCA9685 pca;
+LedcServo servo;
 Preferences prefs;   // Phase C: NVS access (namespace "em")
 WebServer server(80);
 WebSocketsServer webSocket(81);   // F8: push /state JSON to all connected clients
@@ -98,9 +106,9 @@ bool controllerInitialized = false;
 
 // ── Per-channel current-angle tracking ────────────────────────────────────
 //   Maintained by safeSetAngle(). Seeded to a sentinel (-1) so the very first
-//   write to each channel always reaches the PCA9685 (boot calibrate() must
+//   write to each channel always reaches the servo (boot calibrate() must
 //   establish a real pulse on all 6); after that it holds the real angle and
-//   safeSetAngle() skips redundant I2C writes (see M1).
+//   safeSetAngle() skips redundant LEDC writes (see M1).
 float curAngle[6] = { -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f };
 
 // ── Tween engine ──────────────────────────────────────────────────────────
@@ -377,12 +385,12 @@ void loadCanned(int i) {
 void safeSetAngle(uint8_t channel, int angle) {
     if (channel < 6) {
         angle = clamp(angle, SAFE_MIN[channel], SAFE_MAX[channel]);
-        // M1: skip the I2C transaction when the channel is already at this angle.
+        // M1: skip the LEDC write when the channel is already at this angle.
         // (curAngle starts at the -1 sentinel so the first write per channel
         // always goes through.) Kills the ~330 redundant lid writes/sec at idle.
         if ((int)curAngle[channel] == angle) return;
     }
-    pca.setServoAngle(channel, angle);
+    servo.setServoAngle(channel, angle);
     if (channel < 6) curAngle[channel] = (float)angle;
 }
 
@@ -395,7 +403,7 @@ void calWrite(uint8_t ch, int angle, bool edge) {
     int lo = edge ? 0   : SAFE_MIN[ch];
     int hi = edge ? 180 : SAFE_MAX[ch];
     angle = clamp(angle, lo, hi);
-    pca.setServoAngle(ch, angle);
+    servo.setServoAngle(ch, angle);
     curAngle[ch] = (float)angle;
 }
 
@@ -914,17 +922,11 @@ void setup() {
     nvsLoadCal();   // Phase C: restore saved calibration if present (keeps defaults otherwise)
     applyCal();     // populate limits[]/SAFE_* from cal[]
 
-    // I2C to the PCA9685 — SDA=4, SCL=5 (matches the ESP32-S3 wiring)
-    Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
-    Wire.setClock(100000);
-
-    // Initialise PCA9685
-    pca.begin();
-    pca.setPWMFreq(50);  // 50 Hz standard for hobby servos
-    pca.setDebug(DEBUG_PWM);
-    Serial.println(pca.isConnected()
-        ? "PCA9685 detected on I2C (0x40) — commands will drive real servos"
-        : "PCA9685 NOT found — running in SIM mode (commands logged only)");
+    // Direct-drive servos: LEDC hardware PWM, 50 Hz, 12-bit (see LedcServo.h)
+    servo.begin(SERVO_PIN);
+    servo.setPWMFreq(50);  // 50 Hz standard for hobby servos
+    servo.setDebug(DEBUG_PWM);
+    Serial.println("LEDC servo driver ready — 6 channels, direct drive (no PCA9685)");
 
     // No physical inputs to configure — mode and movement come from the web.
 
@@ -1236,10 +1238,10 @@ void setup() {
 // ═══════════════════════════════════════════════════════════════════════════
 //  loop()
 // ═══════════════════════════════════════════════════════════════════════════
-// NOTE: compile loop() at -O1. The xtensa-esp32s3 GCC in ESP32 core 3.3.10
-// crashes (internal compiler error in the code-hoisting pass) when this
-// function is built at the default -Os. -O1 sidesteps the toolchain bug; the
-// rest of the sketch still builds at -Os. Remove if a fixed core drops the ICE.
+// NOTE: compile loop() at -O1. Kept from the ESP32-S3 build, where the
+// xtensa-esp32s3 GCC in ESP32 core 3.3.10 crashed (internal compiler error
+// in the code-hoisting pass) on this function at the default -Os. Harmless
+// on the classic ESP32 core; remove if you want the default -Os back.
 __attribute__((optimize("O1")))
 void loop() {
     // F9: loop rate counter

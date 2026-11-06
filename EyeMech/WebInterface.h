@@ -366,7 +366,7 @@ const char WEB_INTERFACE_HTML[] PROGMEM = R"raw(
 <body>
     <div class="shell">
         <header>
-            <p class="eyebrow">Animatronic &middot; ESP32-S3</p>
+            <p class="eyebrow">Animatronic &middot; ESP32</p>
             <h1>EyeMech Control</h1>
             <span class="status-pill" id="statusPill"><span class="dot"></span><span id="statusTxt">Sleep</span></span>
         </header>
