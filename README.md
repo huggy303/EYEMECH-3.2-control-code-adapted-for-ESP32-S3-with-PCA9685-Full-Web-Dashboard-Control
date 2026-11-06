@@ -1,4 +1,4 @@
-# EYEMECH ε3.2 control code adapted for ESP32-S3 with PCA9685 Full Web Dashboard Control
+# EYEMECH ε3.2 control code for ESP32-C3 — direct-drive servos, Full Web Dashboard Control
 Based on Will Cogley's Eye Mechanism
 
 <div align="center">
@@ -11,11 +11,10 @@ Based on Will Cogley's Eye Mechanism
 
 ## Overview
 
-EYEMECH ε3.2 turns Will Cogley's animatronic eye mechanism into a self-contained wireless prop. An **ESP32-S3** drives six servos through a **PCA9685** board and hosts its own **offline Wi-Fi dashboard** — no app to install, no internet, and no extra wiring beyond power, the servos, and the I2C link.
+EYEMECH ε3.2 turns Will Cogley's animatronic eye mechanism into a self-contained wireless prop. An **ESP32-C3** drives six servos directly from its LEDC hardware PWM pins and hosts its own **offline Wi-Fi dashboard** — no app to install, no internet, no extra driver board, and no extra wiring beyond power and the six servo signal wires.
 
 Open the dashboard on your phone and you get a live on-screen twin of the eyes, autonomous lifelike behaviour, a choreography editor, and a guided calibration wizard. Everything is controlled from the web page — there are no joysticks, switches, or potentiometers to wire up.
 
-![EyeMech Control dashboard](TestingScreenshots/e2e-dashboard-full.png)
 
 ## Features
 
@@ -28,37 +27,36 @@ Open the dashboard on your phone and you get a live on-screen twin of the eyes, 
 
 ## What You Need
 
-- ESP32-S3 dev board
-- PCA9685 16-channel PWM servo driver
+- ESP32-C3 dev board (e.g. ESP32-C3-DevKitM-1, or any C3 module with GPIO 3/4/5/6/7/10 broken out)
 - 6 servos — 1 pan (left/right), 1 tilt (up/down), and 4 eyelids
-- A 5–6V power supply for the servos
+- A 5–6V power supply for the servos (5 V / 4–5 A recommended — see WIRING.md)
+- A small servo power distribution: perfboard, servo breakout, or Y-harness to split 5 V and GND to the six servos
 - Will Cogley's 3D-printed [animatronic eye mechanism](https://makerworld.com/es/models/1184807-animatronic-eye-mechanism-e3-2)
 
 > Earlier builds used a physical joystick, switches, and a trim pot. Those are **gone** — the web dashboard is now the only control surface.
 
 ## Wiring
 
-The PCA9685 talks to the ESP32-S3 over I2C, and the six servos plug into the PCA9685's channels.
+Each servo signal wire goes straight to one ESP32 GPIO. The servos share one 5–6 V supply with a common ground to the ESP32 (see WIRING.md for the power distribution).
 
 ```
-ESP32-S3                 PCA9685
------------------        -----------------
-GND         ------->     GND
-5V          ------->     VCC
-GPIO4 (SDA) ------->     SDA
-GPIO5 (SCL) ------->     SCL
+ESP32 GPIO      Servo
+----------      ---------------------
+GPIO 3          Left/Right pan
+GPIO 4          Up/Down tilt
+GPIO 5          Top-Left eyelid
+GPIO 6          Bottom-Left eyelid
+GPIO 7          Top-Right eyelid
+GPIO 10         Bottom-Right eyelid
 
-PCA9685 Channel Map
------------------
-Channel 0   ------->     Left/Right pan servo
-Channel 1   ------->     Up/Down tilt servo
-Channel 2   ------->     Top-Left eyelid
-Channel 3   ------->     Bottom-Left eyelid
-Channel 4   ------->     Top-Right eyelid
-Channel 5   ------->     Bottom-Right eyelid
+ESP32 GND  ---> servo supply GND (common ground, mandatory)
 ```
 
-Give the servos their own 5–6V supply with a common ground to the ESP32 — don't try to power them from the board's 3.3V rail.
+Pin map is a single table in the sketch (`SERVO_PIN[]` in `EyeMech.ino`) — change the numbers there only. The C3 has only GPIO 0–21 and exactly 6 LEDC channels, all used here. Pins avoid strapping pins (2/8/9), SPI flash pins (12–17), USB D−/D+ (18/19) and UART0 (20/21); spares are 0, 1, 11.
+
+Give the servos their own 5–6 V supply with a common ground to the ESP32 — don't try to power them from the board's 3.3 V rail or its 5 V pin. The old PCA9685 board used to provide the servo power rail; without it, the power distribution is a small piece of perfboard or a servo breakout (details in WIRING.md).
+
+Porting note: the angle-to-pulse mapping is identical to the classic-ESP32 direct-drive build and the original ESP32-S3 + PCA9685 build (0–180° → 150–600 counts at 50 Hz, 12-bit), so calibration values saved on either build carry over unchanged.
 
 ## Getting Started
 
@@ -67,14 +65,14 @@ Give the servos their own 5–6V supply with a common ground to the ESP32 — do
 The firmware is an Arduino sketch in the `EyeMech/` folder. The easiest path is [`arduino-cli`](https://arduino.github.io/arduino-cli/) with the ESP32 core installed:
 
 ```
-arduino-cli compile --upload -p <YOUR_PORT> --fqbn esp32:esp32:esp32s3 ./EyeMech
+arduino-cli compile --upload -p <YOUR_PORT> --fqbn esp32:esp32:esp32c3 ./EyeMech
 ```
 
 One external library is required: **WebSockets by Links2004** (install it via the Library Manager). You can also open `EyeMech/EyeMech.ino` in the Arduino IDE and upload from there.
 
 ### 2. Connect to the eyes
 
-Once flashed, the ESP32-S3 creates its own Wi-Fi network:
+Once flashed, the ESP32 creates its own Wi-Fi network:
 
 1. **Find the network:** look for the Wi-Fi SSID `EyeMech-Controller`.
 2. **Join it:** the password is `eyemech123`.
@@ -90,29 +88,23 @@ Switch modes from the buttons under the digital twin.
 
 **Sleep** — the resting state. The eyes drift slowly closed and "breathe." Any tap wakes them. The eyes also drop back to sleep on their own after 5 minutes of no activity.
 
-![Sleep view](TestingScreenshots/e2e-view-sleep.png)
 
 **Alive** — the star of the show. The Personality Engine takes over: the eyes glance around, blink naturally, and shift mood on their own. Tap a **mood** (Calm, Alert, Curious, Sleepy, Skittish) to steer the feel, or fire a one-shot **expression** (wink, squint, wide, skeptical).
 
-![Alive view](TestingScreenshots/e2e-view-alive.png)
 
 **Manual** — you take the wheel. Drag the virtual joystick to aim the gaze, and use the **Blink** button on demand. The **Record** button captures your moves into a choreography.
 
-![Manual view](TestingScreenshots/e2e-view-manual.png)
 
 **Choreography** — build a sequence of keyframes, then play, loop, or stop it. Ten built-in animations are ready to go, and your own creations save in the browser.
 
-![Choreography view](TestingScreenshots/e2e-view-choreo.png)
 
 **Calibrate** — the guided wizard for setting each servo's centre, travel, and safe limits. The eyes hold still while you work, and you can save, revert, or reset.
 
-![Calibration wizard](TestingScreenshots/e2e-cal-step01.png)
 
 ## How It Works
 
-The firmware runs a simple state machine — Sleep, Alive, Manual, Calibration, and Perform — and serves a single web page straight from the chip's flash. The dashboard talks to the device over a small HTTP API and a WebSocket that streams the live eye state, which is what keeps the on-screen twin in sync with the real servos. Because the ESP32-S3 is its own access point and web server, the whole thing works with no internet connection at all.
+The firmware runs a simple state machine — Sleep, Alive, Manual, Calibration, and Perform — and serves a single web page straight from the chip's flash. The dashboard talks to the device over a small HTTP API and a WebSocket that streams the live eye state, which is what keeps the on-screen twin in sync with the real servos. Because the ESP32 is its own access point and web server, the whole thing works with no internet connection at all.
 
-Want the full technical details — the HTTP API, architecture, and code layout? See **[README_DEV.md](README_DEV.md)**.
 
 ## Acknowledgments
 
@@ -123,7 +115,7 @@ The physical eye mechanism is **Will Cogley's** design — full credit for the h
 - [Documentation](https://willcogley.notion.site/EyeMech-3-2-1af24779b64d80b19edfdd795d4b90e5)
 - [3D Models](https://makerworld.com/es/models/1184807-animatronic-eye-mechanism-e3-2)
 
-This project is an independent ESP32-S3 + web-dashboard control layer for that hardware.
+This project is an independent ESP32 + web-dashboard control layer for that hardware.
 
 ## License
 
